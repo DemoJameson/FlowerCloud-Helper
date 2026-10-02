@@ -1,0 +1,29 @@
+name: flowercloud-helper
+
+services:
+  flowercloud-helper:
+    image: ghcr.io/demojameson/flowercloud-helper:latest
+    container_name: flowercloud-helper
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    depends_on:
+      - flaresolverr
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+    environment:
+      TZ: "Asia/Shanghai"
+    #  固定对外订阅地址前缀，如 https://xxx.xxx.com
+    #  PUBLIC_URL: ""
+    #  FLARESOLVERR_URL: "http://flaresolverr:8191"
+    #  FLARESOLVERR_TIMEOUT_MS: "120000"
+
+  # 用于过 CF 验证
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flowercloud-flaresolverr
+    restart: unless-stopped
+    # Chromium 渲染需要，按需分配上限给大不占实际内存
+    shm_size: '1g'

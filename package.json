@@ -1,0 +1,33 @@
+{
+  "name": "flowercloud-helper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "花云订阅助手：登录花云面板自动获取套餐与订阅链接，向代理客户端提供订阅内容与流量信息",
+  "license": "MIT",
+  "author": "DemoJameson",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node test/dev-server.mjs",
+    "mock": "node test/mock-panel.mjs",
+    "test": "npm run lint && npm run test:parse && npm run test:store && npm run test:inline",
+    "test:parse": "node test/parse.test.mjs",
+    "test:store": "node test/store.test.mjs",
+    "test:inline": "node test/check-inline.mjs",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "password": "node bin/cli-password.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.22.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.11.0"
+  }
+}
