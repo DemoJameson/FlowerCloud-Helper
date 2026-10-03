@@ -188,6 +188,67 @@ check('base64 结构仍是合法 base64', /^[A-Za-z0-9+/]+={0,2}$/.test(b64Out.b
 check('手动映射解析', parseManualMap(' a.com=b.com , c.d=e.f ').get('c.d') === 'e.f');
 check('手动映射忽略非法项', parseManualMap('a.com=, =b.com, 1.2.3.4=x.com').size === 0);
 
+/* ---------------- 只改地址类字段，password/uuid 不动 ---------------- */
+
+const creds = `hosts:
+  fake-a.example.com: real-a.example.net
+proxies:
+  - {name: "专线 1", server: fake-a.example.com, port: 10014, password: fake-a.example.com, uuid: fake-a.example.com, sni: fake-a.example.com}
+`;
+const credOut = rewriteHostDomains(creds);
+check('server 已替换', credOut.body.includes('server: real-a.example.net'));
+check('sni 已替换（TLS 握手域名须与 server 一致）', credOut.body.includes('sni: real-a.example.net'));
+check('password 未被替换', credOut.body.includes('password: fake-a.example.com'), JSON.stringify(credOut.body));
+check('uuid 未被替换', credOut.body.includes('uuid: fake-a.example.com'));
+check('节点名未被替换', credOut.body.includes('name: "专线 1"'));
+
+const surgeCred = `[Host]
+fake-b.example.com=real-b.example.net
+
+[Proxy]
+HK = trojan, fake-b.example.com, 443, password=fake-b.example.com, sni=fake-b.example.com
+`;
+const surgeCredOut = rewriteHostDomains(surgeCred);
+check('Surge server 已替换', surgeCredOut.body.includes('trojan, real-b.example.net, 443'));
+check('Surge password= 未被替换', surgeCredOut.body.includes('password=fake-b.example.com'));
+check('Surge sni= 已替换', surgeCredOut.body.includes('sni=real-b.example.net'));
+
+const qxCred = `[dns]
+alias=/fake-c.example.com/real-c.example.net
+
+[server_local]
+trojan = fake-c.example.com:443, password=fake-c.example.com, over-tls=true, tag=HK
+`;
+const qxOut = rewriteHostDomains(qxCred);
+check('QX server 已替换', qxOut.body.includes('trojan = real-c.example.net:443'));
+check('QX password= 未被替换', qxOut.body.includes('password=fake-c.example.com'));
+
+/* ---------------- 链式映射不串味 ---------------- */
+
+const chain = `hosts:
+  ch-a.example.com: ch-b.example.com
+  ch-b.example.com: ch-c.example.net
+proxies:
+  - {name: x, server: ch-a.example.com}
+`;
+const chainOut = rewriteHostDomains(chain);
+check(
+  'a→b 不再串成 a→c',
+  chainOut.body.includes('server: ch-b.example.com'),
+  JSON.stringify(chainOut.body)
+);
+
+/* ---------------- dns.hosts（缩进更深）不被识别 ---------------- */
+
+const dnsHosts = `dns:
+  hosts:
+    d.example.com: e.example.net
+proxies:
+  - {name: x, server: d.example.com}
+`;
+const dnsHostsOut = rewriteHostDomains(dnsHosts);
+check('dns.hosts 保持原样（不是域名→域名映射）', dnsHostsOut.body === dnsHosts, dnsHostsOut.count);
+
 /* ---------------- 边界输入 ---------------- */
 
 check('空字符串', rewriteHostDomains('').count === 0);

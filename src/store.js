@@ -27,6 +27,67 @@ function genToken() {
   return crypto.randomBytes(16).toString('hex');
 }
 
+/**
+ * 把本次抓到的订阅与旧条目对上，沿用旧条目的 id 与 token。
+ *
+ * 为什么要按 name 兜底匹配：机场的上游订阅地址是会变的（重新激活开关、
+ * 上游轮换 token、参数顺序调整都会让 url 变），而客户端手里只有我们
+ * 发的本地地址。只按 url 匹配，一旦机场换了地址就会给用户重新生成
+ * token —— 本地订阅地址跟着失效，客户端全部掉线，这正是本项目要
+ * 消灭的事。所以 url 变了但订阅还是同一条时，必须认出来。
+ *
+ * 匹配分层，先精确后模糊，且每条旧记录只用一次（避免两条新订阅抢同一条旧记录）：
+ *   1. url 完全相同
+ *   2. name 相同（订阅名由机场页面给出，如「Clash」「Trojan Surge」，语义稳定）
+ *   3. 同一位置（前面都没配上时的兜底）
+ *
+ * **必须分层整轮跑，不能一条一条顺着降级**。曾经写成「每条新订阅依次尝试
+ * url → name → 位置」，于是机场删掉 Surge、新增 Loon 且 Loon 排在最前时：
+ * Loon 的 url 配不上就落到位置层，抢走了 Clash 的旧记录；而轮到 Clash 时
+ * url 层、name 层已无旧记录可配，Clash 反而丢了 token —— 恰好是本函数
+ * 要消灭的现象。整轮跑完 url 再整轮跑 name，Clash 会在第一轮就被认领走。
+ */
+function matchSubs(oldSubs, newSubs) {
+  const valid = newSubs.filter((s) => HTTP_RE.test(String(s?.url || '')));
+
+  // name 归一化：机场页面上的空白/大小写差异不该让匹配落空
+  const key = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+  const oldPool = oldSubs.map((s) => ({ sub: s, used: false }));
+  const claimed = new Array(valid.length).fill(null);
+
+  /** 把本轮仍未认领、且满足 pred 的第一条旧记录认领给第 i 条新订阅 */
+  const claim = (i, pred) => {
+    if (claimed[i]) return;
+    const hit = oldPool.find((o) => !o.used && pred(o.sub, i));
+    if (!hit) return;
+    hit.used = true;
+    claimed[i] = hit.sub;
+  };
+
+  const urlOf = (s) => String(s.url).trim();
+  const nameOf = (s, i) => String(s.name || '').trim() || `订阅 ${i + 1}`;
+
+  // 每层跑完整一轮：先精确后模糊，且不会互相抢占
+  for (let i = 0; i < valid.length; i++) claim(i, (o) => o.url === urlOf(valid[i]));
+  for (let i = 0; i < valid.length; i++) {
+    const name = key(nameOf(valid[i], i));
+    if (name) claim(i, (o) => key(o.name) === name);
+  }
+  for (let i = 0; i < valid.length; i++) claim(i, (_o, j) => j === i);
+  for (let i = 0; i < valid.length; i++) claim(i, () => true);
+
+  return valid.map((s, i) => {
+    const kept = claimed[i];
+    return {
+      id: kept?.id || genId(),
+      name: nameOf(s, i),
+      url: urlOf(s),
+      token: kept?.token || genToken(),
+    };
+  });
+}
+
 /** 6 位十六进制 id（URL 安全） */
 function genId() {
   return crypto.randomBytes(8).toString('hex').slice(0, 6);
@@ -368,18 +429,7 @@ class Store {
         trafficUpdatedAt: prev?.trafficUpdatedAt ?? 0,
         lastError: prev?.lastError ?? '',
         lastErrorAt: prev?.lastErrorAt ?? 0,
-        subs: (p.subs || [])
-          .filter((s) => HTTP_RE.test(String(s.url || '')))
-          .map((s, i) => {
-            const url = String(s.url).trim();
-            const kept = (prev?.subs || []).find((x) => x.url === url);
-            return {
-              id: kept?.id || genId(),
-              name: String(s.name || '').trim() || `订阅 ${i + 1}`,
-              url,
-              token: kept?.token || genToken(),
-            };
-          }),
+        subs: matchSubs(prev?.subs || [], p.subs || []),
       };
     });
 

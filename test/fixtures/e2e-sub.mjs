@@ -4,11 +4,15 @@
  *   node test/fixtures/e2e-sub.mjs
  */
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../Desktop/花云');
+if (!existsSync(path.join(dir, 'Clash.yaml'))) {
+  console.log('桌面「花云」样例不存在，跳过');
+  process.exit(0);
+}
 const upstream = readFileSync(path.join(dir, 'Clash.yaml'), 'utf8');
 
 const { fetchSubscription } = await import('../../src/fetchsub.js');
@@ -40,10 +44,11 @@ const reals = pairs.map(([, v]) => v);
 const fake = countAll(out.body, fakes);
 const real = countAll(out.body, reals);
 const nodes = (out.body.match(/^ {2}- \{name:/gm) || []).length;
-const srcRules = (upstream.match(/^ - /gm) || []).length;
-const rules = (out.body.match(/^ - /gm) || []).length;
 const srcNodes = (upstream.match(/^ {2}- \{name:/gm) || []).length;
+const rules = (out.body.match(/^ - /gm) || []).length;
+const srcRules = (upstream.match(/^ - /gm) || []).length;
 const hasHosts = /^hosts:/m.test(out.body);
+const passwordsIntact = !fakes.some((d) => new RegExp(`password[:=]\\s*"?${d.replace(/\./g, '\\.')}`, 'i').test(out.body));
 
 const checks = [
   ['占位域名已清零', fake === 0, `${fake} 处`],
@@ -54,6 +59,7 @@ const checks = [
   ['proxies 段保留', /^proxies:/m.test(out.body)],
   ['contentType 仍为 yaml', out.contentType.includes('yaml'), out.contentType],
   ['下载文件名保留', /attachment/.test(out.disposition || ''), out.disposition],
+  ['password 未被改写', passwordsIntact],
 ];
 
 let bad = 0;

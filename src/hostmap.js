@@ -19,6 +19,13 @@
  *
  * 值不是裸域名的映射（= server:1.1.1.1、= system、= localhost 之类）
  * 一律忽略 —— 那是机场自带的 DNS 分流，改了会改坏行为。
+ *
+ * 两条刻意收窄的范围，都是「宁可少改也不能改坏」：
+ *   1. **只认顶层 `hosts:`**，缩进更深的 `dns.hosts` 不碰。Clash/Mihomo 的
+ *      顶层 hosts 才是「域名→域名」映射，dns 段下的 hosts 语义不同。
+ *   2. **只改地址类字段**（server / sni / tls-host / host，以及各客户端
+ *      节点行里表示服务器地址的位置参数）。节点的 password / uuid 恰好也可能
+ *      等于某个占位域名，改了就是认证失败 —— 见 replaceDomains 的说明。
  */
 
 /** 裸域名：至少一个点、每段合法、顶级域含字母（借 latter 排掉 IP） */
@@ -92,10 +99,12 @@ function scanLines(lines) {
     }
 
     // Clash 顶层 hosts:（行首无缩进，子项缩进更深）
-    const y = line.match(/^([ \t]*)hosts[ \t]*:[ \t]*(#.*)?$/);
+    // 必须限死「行首无缩进」：Clash/Mihomo 只有顶层 hosts 才是域名→域名映射，
+    // 缩进更深的 hosts:（如 dns: 下的）语义不同，误当映射会把人家的配置改坏
+    const y = line.match(/^hosts[ \t]*:[ \t]*(#.*)?$/);
     if (y) {
       blockStart = i;
-      blockIndent = y[1].length;
+      blockIndent = 0;
       continue;
     }
 
@@ -132,20 +141,80 @@ function escapeRe(s) {
 }
 
 /**
- * 正文里的占位域名 → 真实域名。
- * 长 key 先替，避免 a.com 与 b.a.com 之类互相吃掉对方的前缀。
+ * 出现「域名」时，判断它前面最近的那个键名是什么。
+ * 返回 null 表示「这不是 key=value 结构」（如位置参数写法），由调用方另行判断。
+ */
+function fieldBefore(line, idx) {
+  // 往前找最近的 key: 或 key=（含引号包裹的 YAML 键）
+  const before = line.slice(0, idx);
+  const m = before.match(/(?:^|[^A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*)[ \t]*[:=][ \t]*["']?$/);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * 各客户端节点行里「协议名」的位置参数写法：这些词出现在等号/逗号左边时
+ * 是协议类型（trojan = host:port），不是字段名，不能按字段名去判地址。
+ */
+const PROTOCOL_WORDS = /^(?:trojan|ss|ssr|vmess|http|https|snell|socks5?|hysteria2?|tuic)$/;
+
+/** 这些键名里的域名是「凭据」，改了会让节点认证失败 */
+const CREDENTIAL_FIELDS = /^(?:password|passwd|pwd|uuid|alterid|token|secret|key|auth|psk)$/;
+
+/** 这些键名表示「服务器地址」，要替换 */
+const ADDRESS_FIELDS = /^(?:server|sni|tls-?host|servername|host|hostname|address|addr)$/;
+
+/**
+ * 逐行替换，把占位域名换掉，但**只改「地址类」字段**。
+ *
+ * 为什么不能整篇纯文本替换：节点的 password / uuid 恰好也可能等于某个占位
+ * 域名（机场爱用同批域名做各种标识），一改就是节点认证失败。而 sni / tls
+ * 名字段必须改 —— 那是 TLS 握手用的 Host，要与 server 换到同一个域名才对得上。
+ *
+ * 各客户端里表示「服务器地址」的写法：
+ *   Clash / sing-box 等 YAML   server: / server: "x"  —— 具名字段
+ *   Surge / Surfboard 等       = trojan,a.example.com,443,...   （位置参数）
+ *   Quantumult X              trojan = a.example.com:443, ...   （等号后主机名）
+ *   base64 的 v2ray/sing-box   ss://...@a.example.com:8388#name  （@ 与 : 之间）
+ *
+ * 判定顺序：先看该域名前面最近的键名 —— 是凭据字段就跳过，是地址字段就替换；
+ * 没有键名（位置参数写法）再看整行是否像节点行。认不出的行一律不动 ——
+ * 宁可少替换，也不能把密码改坏。
  */
 function replaceDomains(text, map, onHit) {
-  let out = text;
   const keys = [...map.keys()].sort((a, b) => b.length - a.length);
-  for (const k of keys) {
-    const re = new RegExp(`(?<![A-Za-z0-9_.-])${escapeRe(k)}(?![A-Za-z0-9_-])`, 'g');
-    out = out.replace(re, () => {
-      onHit();
-      return map.get(k);
-    });
-  }
-  return out;
+  if (!keys.length) return text;
+
+  // 一次匹配全部 key（长的排前面），单趟替换避免链式串味
+  const re = new RegExp(`(?<![A-Za-z0-9_.-])(?:${keys.map(escapeRe).join('|')})(?![A-Za-z0-9_-])`, 'g');
+
+  return text
+    .split('\n')
+    .map((line) => {
+      re.lastIndex = 0;
+      if (!re.test(line)) return line;
+
+      // 无键名的位置参数写法：整行像节点行才允许替换
+      const positional =
+        /\b(?:trojan|ss|ssr|vmess|http|https|snell|socks5?)\s*[,=]/i.test(line) ||
+        /:\/\/[^@/\s]*@/.test(line) || // v2ray URI 的 @host:port
+        /^\s*[\w-]+\s*=\s*[\w.-]+\.[a-z]{2,}/i.test(line); // QX 的 trojan = host:port
+
+      re.lastIndex = 0;
+      return line.replace(re, (m, offset) => {
+        const field = fieldBefore(line, offset);
+
+        if (field && !PROTOCOL_WORDS.test(field)) {
+          // 具名字段：只改地址类字段；凭据字段（password/uuid 等）跳过
+          if (CREDENTIAL_FIELDS.test(field) || !ADDRESS_FIELDS.test(field)) return m;
+        } else if (!positional && !(field && PROTOCOL_WORDS.test(field))) {
+          // 既没键名、也不像节点行 → 认不出来，不动
+          return m;
+        }
+        onHit();
+        return map.get(m) || m;
+      });
+    })
+    .join('\n');
 }
 
 /** 解析手动映射：SUB_HOST_MAP="a.com=b.com, c.com=d.com" */
