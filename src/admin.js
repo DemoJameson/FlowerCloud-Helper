@@ -380,6 +380,8 @@ button{font-family:inherit}
 .btn:disabled{opacity:.45;cursor:default}
 .btn.ghost{background:var(--surface-3);border-color:var(--line);color:var(--fg)}
 .btn.ghost:hover:not(:disabled){background:var(--line-soft);border-color:var(--accent)}
+/* 按钮样式的链接（顶栏「项目」）：去掉全局 a 的下划线，hover 交给 .btn.ghost */
+a.btn:hover{text-decoration:none}
 .btn.danger{background:transparent;border-color:color-mix(in srgb,var(--err) 45%,transparent);color:var(--err)}
 .btn.danger:hover:not(:disabled){background:color-mix(in srgb,var(--err) 12%,transparent)}
 .btn.sm{padding:5px 10px;font-size:12px;border-radius:8px}
@@ -647,6 +649,8 @@ ul.files a{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media (max-width:430px){
   .brand-name{display:none}
   .topbar-actions .btn{padding:6px 10px;font-size:12px}
+  /* 项目链接只留 GitHub 图标：图标本身即入口，title 里有说明 */
+  .topbar-actions .btn-repo span{display:none}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}
@@ -1234,6 +1238,11 @@ function page(title, body) {
 
 const LOGO = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M5 19V5h10"/><path d="M5 12h8"/></svg>`;
 
+/** 项目地址（顶栏「项目」按钮与设置页底部都指向这里） */
+const REPO_URL = 'https://github.com/DemoJameson/FlowerCloud-Helper';
+
+const ICON_GITHUB = `<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.73.5.5 5.73.5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2.1c-3.2.7-3.88-1.37-3.88-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.4-5.25 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5Z"/></svg>`;
+
 const HEADER = (active) => `
 <div class="topbar"><div class="topbar-in">
   <div class="brand">
@@ -1248,6 +1257,7 @@ const HEADER = (active) => `
     <a class="tab${active === 'config' ? ' active' : ''}" href="/config">设置</a>
   </nav>
   <div class="topbar-actions">
+    <a class="btn ghost sm btn-repo" href="${REPO_URL}" target="_blank" rel="noopener noreferrer" title="项目源码与文档（GitHub）">${ICON_GITHUB}<span>项目</span></a>
     <button id="btnLogout" class="btn ghost sm" type="button">退出登录</button>
   </div>
 </div></div>`;
