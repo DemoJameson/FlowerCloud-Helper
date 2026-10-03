@@ -1,0 +1,35 @@
+# 构建上下文只需要 Dockerfile 实际 COPY 的那点东西（package*.json + src/）。
+# 本地 node_modules 有 35MB，不挡掉的话每次 docker build 都要传给 daemon 一遍。
+
+node_modules
+npm-debug.log*
+
+# 运行时数据与本地密钥：绝不能进镜像层，也不该出现在构建上下文里
+data
+test/config.dev.json
+.env
+.env.*
+
+# 版本控制与 CI 配置：镜像不需要
+.git
+.gitignore
+.github
+
+# 测试、文档、部署文件：src/ 之外的一切
+test
+docs
+bin
+README.md
+LICENSE
+docker-compose.yml
+eslint.config.js
+
+# IDE 与 Agent 工作区
+.idea
+.vscode
+*.iml
+.workbuddy
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
