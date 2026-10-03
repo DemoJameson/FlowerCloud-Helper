@@ -1,0 +1,17 @@
+port: 7890
+dns:
+  enable: true
+  use-hosts: true
+  nameserver:
+    - tls://119.29.29.29
+proxies:
+  - {name: "Traffic: 12.77 GB | 150 GB", server: fake-node-0.example.com, port: 10014, type: ss, cipher: aes-128-gcm, password: REDACTED, plugin: obfs, plugin-opts: {mode: http, host: sni-0.example.org}, udp: false}
+  - {name: "Expire: 2027-10-01", server: fake-node-0.example.com, port: 10014, type: ss, cipher: aes-128-gcm, password: REDACTED, plugin: obfs, plugin-opts: {mode: http, host: sni-0.example.org}, udp: false}
+  - {name: 🇭🇰 香港实验性 IEPL 专线 1, server: fake-node-0.example.com, port: 10014, type: ss, cipher: aes-128-gcm, password: REDACTED, plugin: obfs, plugin-opts: {mode: http, host: sni-0.example.org}, udp: false}
+  - {name: 🇯🇵 日本实验性 IEPL 专线 1, server: fake-node-1.example.com, port: 10024, type: ss, cipher: aes-128-gcm, password: REDACTED, plugin: obfs, plugin-opts: {mode: http, host: sni-0.example.org}, udp: false}
+hosts:
+  fake-node-2.example.com: real-node-0.example.net
+  fake-node-0.example.com: real-node-1.example.net
+  fake-node-1.example.com: real-node-2.example.net
+rules:
+ - MATCH,DIRECT

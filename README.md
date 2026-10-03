@@ -69,7 +69,47 @@ services:
 | `SESSION_SUFFIX` | `default` | FlareSolverr 会话名后缀，同机多实例时区分 |
 | `SUB_TIMEOUT_MS` | `60000` | 订阅回源拉取超时 |
 | `BASE_URL` | `https://api-flowercloud.com` | 订阅回源时 referer 的兜底机场地址（正常走各账号配置里的地址） |
+| `HOST_REWRITE` | `on` | 节点域名替换（见下）。设 `off` 关闭 |
+| `HOST_MAP` | 空 | 手动补充映射 `"占位域名=真实域名,..."`，供 base64 订阅使用 |
 | `DEBUG_DIR` | `<项目>/data/debug`（镜像内 `/data/debug`） | 调试文件目录，管理页 `/api/debug` 只读列出（需手动放置） |
+
+## 节点域名替换
+
+机场下发的订阅里，节点的 `server` 往往是一个**占位域名**，真正能连的入口域名只出现在 hosts 映射里：
+
+```yaml
+proxies:
+  - {name: "香港 1", server: aaaa1111-2222.placeholder.example.com, port: 10014, ...}
+hosts:
+  aaaa1111-2222.placeholder.example.com: bbbb3333-4444.real-entry.example.net
+```
+
+客户端必须支持并启用了 hosts 才能连上（Clash 要 `use-hosts`，sing-box 之类内核干脆没有 hosts 概念），否则一律握手失败。
+
+本项目在转发订阅前把映射「落地」：删掉映射条目本身，再把正文里所有占位域名替换成真实域名。客户端拿到的配置里 `server` 已经是真实入口域名，不再依赖 hosts。
+
+识别的写法：
+
+| 客户端 | 映射写法 |
+|---|---|
+| Clash / Mihomo | `hosts:` → `a.com: b.com` |
+| Surge / Surfboard / Shadowrocket / Loon | `[Host]` → `a.com = b.com` |
+| Quantumult X | `[dns]` → `alias=/a.com/b.com` |
+
+几个边界：
+
+- **通用订阅零影响** —— 没有这类映射时原样转发，行为与以前完全一致
+- 值不是裸域名的映射（`= server:1.1.1.1`、`= system`）属于机场自带的 DNS 分流，一律保留不动
+- hosts 段里若还有其它非映射条目，`hosts:` 键名保留；删空时才连键名一起去掉
+- base64 订阅（v2ray / sing-box 那种编码文本）读不到 hosts 段，需要手填 `HOST_MAP`
+- 改写失败时退回原样转发，不会连累订阅本身
+
+`HOST_MAP` 示例：
+
+```yaml
+environment:
+  HOST_MAP: "aaaa1111-2222.placeholder.example.com=bbbb3333-4444.real-entry.example.net"
+```
 
 ## 环境变量之外的其它在网页里配
 

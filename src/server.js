@@ -88,6 +88,8 @@ function sendSubscription(res, out) {
   res.set('profile-update-interval', '24');
   // 流量信息是套餐级的，但客户端从每条订阅的响应头读，这里透传
   if (out.userInfo) res.set('subscription-userinfo', out.userInfo);
+  // attachment：浏览器直接下载，而不是把 YAML 当网页内联渲染
+  if (out.disposition) res.set('content-disposition', out.disposition);
   res.set('cache-control', 'no-store');
   res.type(out.contentType).send(out.body);
 }

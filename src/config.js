@@ -47,4 +47,14 @@ export const config = {
 
   // 订阅地址回源拉取（fetchsub.js 用作 referer 兜底）
   baseUrl: optional('BASE_URL', 'https://api-flowercloud.com'),
+
+  // 节点域名替换：机场给的节点 server 常是占位域名，真入口域名藏在 hosts
+  // 映射里（见 hostmap.js）。默认 on —— 转发前把映射落地到节点上，客户端
+  // 不依赖 hosts 也能连。设 off 可回到「原样转发 + 靠客户端 hosts」的老行为。
+  // "auto" 与 on 等价：正文里没有这类映射时本来就什么都不做。
+  hostRewrite: optional('HOST_REWRITE', 'on').toLowerCase(),
+
+  // 手动补充映射 "占位域名=真实域名,占位域名2=真实域名2"，
+  // 供 base64 订阅（v2ray / sing-box 那种编码文本，读不到 hosts 段）使用
+  hostMap: optional('HOST_MAP'),
 };
