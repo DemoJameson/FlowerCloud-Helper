@@ -1,8 +1,9 @@
 import express from 'express';
 import { config } from './config.js';
 import { store } from './store.js';
-import { refreshAll, refreshAccount, refreshPlanTraffic, describeError, reauthorize, statusPayload, syncTrafficFromSubFetch } from './state.js';
+import { refreshAll, refreshAccount, refreshPlanTraffic, describeError, reauthorize, statusPayload, syncTrafficFromSubFetch, withRefreshMarker } from './state.js';
 import { fetchSubscription } from './fetchsub.js';
+import { autoRefreshStatus } from './scheduler.js';
 import { log } from './logtime.js';
 import { registerAdminRoutes, hasValidSession, safeEqual, sameOriginOnly } from './admin.js';
 
@@ -157,7 +158,7 @@ export function createServer() {
   // 非管理会话（即用订阅 token 调用）时响应里不带任何 token，
   // 持有单条订阅 token 的调用方不能顺走其它订阅的
   app.get('/status', strictAuth, (req, res) =>
-    res.json(statusPayload({ tokens: hasValidSession(req) }))
+    res.json({ ...statusPayload({ tokens: hasValidSession(req) }), autoRefresh: autoRefreshStatus() })
   );
 
   /* ---------------- 手动刷新 ---------------- */
@@ -173,7 +174,9 @@ export function createServer() {
       if (accountId) {
         const account = store.getAccount(String(accountId));
         if (!account) return res.status(404).json({ ok: false, error: '未知机场账号' });
-        const out = await refreshAccount(account);
+        // 整段请求都算「刷新中」：仪表盘的「刷新全部」就是按账号连打这个接口，
+        // 标记上之后定时那一轮才会真的跳过，而不是挤进来排队
+        const out = await withRefreshMarker(refreshAccount(account));
         return res.json({ ok: out.ok, okCount: out.ok ? 1 : 0, total: 1, results: [out] });
       }
       const out = await refreshAll('manual');

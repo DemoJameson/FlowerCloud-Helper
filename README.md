@@ -114,7 +114,7 @@ environment:
 
 ## 环境变量之外的其它在网页里配
 
-机场账号、套餐、订阅 token 全部存于 `data/config.json`，通过管理页读写；支持导出 / 导入迁移。
+机场账号、套餐、订阅 token、自动刷新间隔全部存于 `data/config.json`，通过管理页读写；支持导出 / 导入迁移。
 
 忘记管理口令：打开 `config.json` 的 `adminPassword` 字段直接查看，或运行 `npm run password`。
 

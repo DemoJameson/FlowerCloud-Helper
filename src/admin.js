@@ -5,7 +5,8 @@ import express from 'express';
 import { config } from './config.js';
 import { store } from './store.js';
 import { statusPayload } from './state.js';
-import { validateAdminPassword } from './store.js';
+import { validateAdminPassword, validateAutoRefreshMinutes } from './store.js';
+import { autoRefreshStatus, startAutoRefresh } from './scheduler.js';
 import { log, dateOnly } from './logtime.js';
 
 const COOKIE_NAME = 'hy_admin';
@@ -782,8 +783,24 @@ function tile(label,value,foot,cls){
     '<div class="stat-foot">'+esc(foot)+'</div></div>';
 }
 
+/** 自动刷新状态一句话说明（显示在总览标题旁） */
+function autoRefreshText(a){
+  if(!a) return '';
+  if(!a.enabled) return '自动刷新：已关闭';
+  if(a.running) return '自动刷新：进行中…';
+  var when=a.nextRunAt?new Date(a.nextRunAt):null;
+  var t=when?(('0'+when.getHours()).slice(-2)+':'+('0'+when.getMinutes()).slice(-2)):'';
+  return '自动刷新：每 '+(a.minutes||0)+' 分钟'+(t?('，下次 '+t):'');
+}
+
 function render(s){
   renderStats(s);
+
+  var oh=el('overviewHint');
+  if(oh){
+    var at=autoRefreshText(s.autoRefresh);
+    oh.textContent='订阅内容实时回源、流量随回源同步；套餐结构在定时/手动「刷新全部」或订阅自愈时更新'+(at?(' · '+at):'');
+  }
 
   var accounts=s.accounts||[];
   var warns=[];
@@ -980,6 +997,10 @@ function boot(){
     history.replaceState(null,'',location.pathname);
     doRefreshAll(val==='all'? null : val.split(',').filter(Boolean));
   }
+
+  // 后台每 60 秒静默拉一次状态：定时刷新在服务端自己跑，页面不轮询就看不到
+  // 流量与「下次自动刷新时间」的变化（页面切到后台时不打扰）
+  setInterval(function(){ if(!document.hidden) load(true); }, 60000);
 }
 document.addEventListener('DOMContentLoaded',boot);
 `;
@@ -1091,7 +1112,28 @@ async function load(){
     });
     render();
     setDirty(false);
+    var ar=el('autoRefreshMinutes');
+    if(ar) ar.value=(j.autoRefreshMinutes==null?20:j.autoRefreshMinutes);
   }catch(e){ toast('加载失败：'+e,'err'); }
+}
+
+/** 自动刷新间隔：单独保存（与机场账号的「保存」互不影响） */
+async function saveAutoRefresh(){
+  var inp=el('autoRefreshMinutes'), btn=el('btnSaveAutoRefresh');
+  var raw=inp?inp.value:'';
+  busy(btn,true,'保存中…');
+  try{
+    var r=await fetch('/api/config/auto-refresh',{method:'POST',credentials:'same-origin',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({minutes:raw===''?0:Number(raw)})});
+    var j=await r.json().catch(function(){return {error:'响应异常'};});
+    if(!r.ok||!j.ok){ toast('保存失败：'+(j.error||r.status),'err'); }
+    else{
+      if(inp) inp.value=j.autoRefreshMinutes;
+      toast(j.autoRefreshMinutes?('已设为每 '+j.autoRefreshMinutes+' 分钟自动刷新一次'):'已关闭自动刷新','ok');
+    }
+  }catch(e){ toast('保存失败：'+e,'err'); }
+  busy(btn,false);
 }
 
 function collect(){
@@ -1187,6 +1229,8 @@ function boot(){
     setDirty(true);
     toast('已生成随机口令，点「修改口令」生效','ok');
   });
+  var btnAuto=el('btnSaveAutoRefresh');
+  if(btnAuto) btnAuto.addEventListener('click',saveAutoRefresh);
   el('btnChangePw').addEventListener('click',async function(){
     var pw=el('newPw').value;
     var btn=el('btnChangePw'); btn.disabled=true;
@@ -1319,8 +1363,9 @@ function dashboardPage() {
   <section class="section">
     <div class="section-head">
       <h2>总览</h2>
-      <span class="hint-text">订阅内容实时回源、流量随回源同步；套餐结构在点「刷新全部」或订阅自愈时更新</span>
-      <span class="spacer"></span>
+      <span id="overviewHint" class="hint-text">订阅内容实时回源、流量随回源同步；套餐结构在定时/手动「刷新全部」或订阅自愈时更新</span>
+      <!-- 提示文字自身 flex:1，会占满到按钮为止的全部宽度；
+           这里不能再放 .spacer —— 两个 flex:1 平分空间，提示会被挤到折行 -->
       <button id="btnRefresh" class="btn" type="button">刷新全部</button>
     </div>
     <div id="stats" class="stats">
@@ -1364,6 +1409,28 @@ function configPage() {
       <span class="hint-text">保存后自动转到仪表盘并抓取套餐；也可随时回仪表盘点「刷新全部」</span>
     </div>
     <div id="accounts"><div class="empty">加载中…</div></div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <h2>自动刷新</h2>
+      <span class="hint-text">每隔一段时间自动「刷新全部」：登录面板重抓套餐与订阅、更新流量与到期</span>
+    </div>
+    <div class="card">
+      <div class="grid2">
+        <div>
+          <label for="autoRefreshMinutes">刷新间隔（分钟）</label>
+          <input id="autoRefreshMinutes" type="number" min="0" max="1440" step="1" placeholder="20" spellcheck="false">
+          <div class="hint">默认 20 分钟；填 <code>0</code> 关闭（只保留手动刷新与订阅失效自愈）。订阅内容始终实时回源，不受这个间隔影响。</div>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <div class="pw-actions">
+            <button id="btnSaveAutoRefresh" class="btn" type="button">保存间隔</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <section class="section">
@@ -1492,7 +1559,11 @@ export function registerAdminRoutes(app) {
 
   router.get('/api/status', requireAuth, (req, res) => {
     // 管理页要完整数据：订阅地址带 token、附机场原始地址
-    res.json({ ...statusPayload({ tokens: true, realUrls: true }), https: isHttps(req) });
+    res.json({
+      ...statusPayload({ tokens: true, realUrls: true }),
+      autoRefresh: autoRefreshStatus(),
+      https: isHttps(req),
+    });
   });
 
   /* ---- 机场账号（仅管理会话；写操作校验同源） ---- */
@@ -1508,6 +1579,7 @@ export function registerAdminRoutes(app) {
         hasPassword: !!a.password,
       })),
       updatedAt: store.data.updatedAt,
+      autoRefreshMinutes: store.data.autoRefreshMinutes,
     });
   });
 
@@ -1528,6 +1600,22 @@ export function registerAdminRoutes(app) {
       store.setAdminPassword(pw); // 内部先过强度校验，不达标直接抛
       log('[admin] 管理口令已修改');
       res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ ok: false, error: e.message });
+    }
+  });
+
+  // 自动「刷新全部」的间隔（分钟，0 = 关闭）
+  router.post('/api/config/auto-refresh', requireAuth, sameOriginOnly, (req, res) => {
+    try {
+      const raw = req.body?.minutes;
+      const err = validateAutoRefreshMinutes(raw);
+      if (err) return res.status(400).json({ ok: false, error: err });
+      const minutes = store.setAutoRefreshMinutes(raw);
+      // 立即生效：按新间隔重新排下一次（不因此立刻刷一遍 —— 手抖连点会把机场打疼）
+      startAutoRefresh({ firstDelayMs: minutes > 0 ? minutes * 60_000 : 0 });
+      log(`[admin] 自动刷新间隔已设为 ${minutes} 分钟${minutes ? '' : '（已关闭）'}`);
+      res.json({ ok: true, autoRefreshMinutes: minutes, autoRefresh: autoRefreshStatus() });
     } catch (e) {
       res.status(400).json({ ok: false, error: e.message });
     }

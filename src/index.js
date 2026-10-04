@@ -1,6 +1,7 @@
 import { store } from './store.js';
 import { startServer } from './server.js';
 import { shutdown } from './state.js';
+import { startAutoRefresh, stopAutoRefresh } from './scheduler.js';
 import { log } from './logtime.js';
 
 async function main() {
@@ -10,11 +11,13 @@ async function main() {
     `[boot] 配置：${store.data.accounts.length} 个机场账号 / ` +
       `${store.data.products.length} 个套餐 / ${subCount} 条订阅链接`
   );
-  log('[boot] 订阅内容实时回源（流量随回源同步）；套餐结构在「刷新全部」或订阅失效自愈时更新');
+  log('[boot] 订阅内容实时回源（流量随回源同步）；套餐结构在定时/手动「刷新全部」或订阅失效自愈时更新');
 
   startServer();
-  // 不做定时抓取：订阅内容每次实时回源，流量顺带同步；套餐结构靠手动
-  // 「刷新全部」或订阅失效时的自动重授权 —— 定时抓只是白耗机场配额
+  // 定时「刷新全部」：默认每 20 分钟（设置页可改，0 关闭）。它抓的是套餐
+  // 结构（机场换订阅地址、套餐上下架只有重新登录才知道），不等客户端拉失败
+  // 再自愈 —— 那会先断一会儿。订阅内容仍然每次实时回源，不缓存。
+  startAutoRefresh();
 }
 
 /*
@@ -26,6 +29,8 @@ async function shutdownHandler(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`[boot] 收到 ${signal}，开始退出…`);
+  // 先停定时刷新：否则清理期间可能又排上一轮，去抢正在释放的 FlareSolverr 会话
+  stopAutoRefresh();
   const force = setTimeout(() => {
     console.error('[boot] 清理超时，强制退出');
     process.exit(1);

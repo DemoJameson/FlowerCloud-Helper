@@ -120,7 +120,8 @@ function withSessionLock(fn) {
 
 /** 抓一个账号的套餐与订阅结构（串行占用 FlareSolverr 会话） */
 export function discoverAccount(account) {
-  return withSessionLock(() => discoverAccountLocked(account));
+  // 从排队等锁到抓完都算「进行中」：reauthorize 自愈走的也是这里
+  return withRefreshMarker(withSessionLock(() => discoverAccountLocked(account)));
 }
 
 async function discoverAccountLocked(account) {
@@ -322,11 +323,40 @@ export async function refreshAccount(account, { onlyProductId = null } = {}) {
   return r;
 }
 
+/* ---- 「正在刷新」的计数 ----
+ * 手动刷新与定时刷新都要占用同一条 FlareSolverr 会话（见 login 的说明），
+ * 重跑只会排队白耗机场配额 —— 调度器靠它整轮跳过（scheduler.js）。
+ *
+ * ⚠️ 计数必须覆盖**所有**占用面板会话的路径，而不只是 refreshAll：
+ * 仪表盘的「刷新全部」按钮是前端按账号逐个调 /refresh（走 refreshAccount，
+ * 不经过 refreshAll），只统计 refreshAll 的话，用户手动刷的那几分钟里
+ * 计数一直是 0，定时那一轮照跑不误 —— 正是这里要防的叠加。
+ * 所以 refreshAll（整轮）+ discoverAccount（每次登录抓取，含 reauthorize
+ * 自愈）+ /refresh 的单账号分支，三处都挂上。 */
+let panelRefreshRunning = 0;
+
+/** 是否有刷新正在占用面板会话（手动 / 定时 / 失效自愈都算） */
+export function refreshInProgress() {
+  return panelRefreshRunning > 0;
+}
+
+/** 把一段刷新过程标记为「进行中」，Promise 落地（成功或失败）后自动解除 */
+export function withRefreshMarker(promise) {
+  panelRefreshRunning++;
+  return promise.finally(() => {
+    panelRefreshRunning--;
+  });
+}
+
 /**
  * 刷新全部账号（前端「刷新全部」按账号逐个调用，以便显示进度）。
  * 返回 { ok, okCount, total, results:[{account, ok, error, products}] }
  */
-export async function refreshAll(reason = 'manual') {
+export function refreshAll(reason = 'manual') {
+  return withRefreshMarker(refreshAllOnce(reason));
+}
+
+async function refreshAllOnce(reason) {
   rebuildRuntime();
   const accounts = store.data.accounts;
   if (!accounts.length) {

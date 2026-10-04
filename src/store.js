@@ -5,6 +5,7 @@
  *   accounts[]   机场账号：机场名 + 地址 + 邮箱 + 密码（可配多个，同机场不同账号）
  *   products[]   抓取到的套餐，归属某个账号；流量/到期是套餐级信息，
  *                刷新时每个套餐只拉一条订阅即可拿到（各订阅共用同一个上游 token）
+ *   autoRefreshMinutes  自动「刷新全部」的间隔（分钟），0 = 关闭，默认 20
  *
  * 用户只需要填账号，套餐与订阅链接全部由程序登录后自动获取。
  */
@@ -17,6 +18,25 @@ import { log } from './logtime.js';
 const HTTP_RE = /^https?:\/\//i;
 export const DEFAULT_BASE_URL = 'https://api-flowercloud.com';
 export const DEFAULT_ACCOUNT_NAME = '花云';
+
+/**
+ * 自动「刷新全部」的间隔（分钟）。0 = 关闭（只保留手动刷新与失效自愈）。
+ * 上限 1 天：再长没有意义，再短会把机场打疼（每次都要登录面板抓一遍）。
+ */
+export const DEFAULT_AUTO_REFRESH_MINUTES = 20;
+export const MAX_AUTO_REFRESH_MINUTES = 24 * 60;
+
+/**
+ * 归一自动刷新间隔。手改配置写坏了也不该让服务起不来，所以这里只做
+ * 收敛不抛错：非数字 → 默认值，负数 → 0，超大 → 上限。需要严格校验的
+ * 入口（管理页保存）自己先判一次再调进来。
+ */
+export function normalizeAutoRefreshMinutes(raw) {
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_AUTO_REFRESH_MINUTES;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_AUTO_REFRESH_MINUTES;
+  return Math.min(MAX_AUTO_REFRESH_MINUTES, Math.max(0, Math.round(n)));
+}
 
 function fail(msg) {
   throw new Error(`配置错误：${msg}`);
@@ -200,6 +220,18 @@ function normAccount(raw, where, seen) {
   };
 }
 
+/** 校验管理页提交的自动刷新间隔；通过返回 ''，否则返回给用户看的错误信息 */
+export function validateAutoRefreshMinutes(raw) {
+  const n = Number(raw);
+  if (raw === '' || raw === null || raw === undefined || !Number.isFinite(n)) {
+    return '自动刷新间隔必须是数字（分钟），0 表示关闭';
+  }
+  if (n < 0 || n > MAX_AUTO_REFRESH_MINUTES) {
+    return `自动刷新间隔需在 0（关闭）到 ${MAX_AUTO_REFRESH_MINUTES} 分钟之间`;
+  }
+  return '';
+}
+
 /* ------------------------------------------------------------------ */
 /* 套餐与订阅（程序抓取，也可手工预填）                                   */
 /* ------------------------------------------------------------------ */
@@ -287,6 +319,8 @@ export function normalize(raw, { seenIds = null } = {}) {
     sessionSecret: String(raw?.sessionSecret ?? '').trim(),
     // 管理口令：明文存储（网页设置，便于从配置文件直接找回）
     adminPassword: String(raw?.adminPassword ?? ''),
+    // 自动「刷新全部」间隔（分钟）；0 = 关闭。默认 20 分钟（见 scheduler.js）
+    autoRefreshMinutes: normalizeAutoRefreshMinutes(raw?.autoRefreshMinutes),
     updatedAt: Number(raw?.updatedAt) || 0,
   };
 
@@ -493,6 +527,18 @@ class Store {
   /** 管理口令（明文存于配置文件，便于本地找回） */
   plainAdminPassword() {
     return String(this.data.adminPassword ?? '');
+  }
+
+  /**
+   * 设置自动「刷新全部」的间隔（分钟），0 = 关闭。返回落盘后的值。
+   * 调用方（管理页接口）应先过 validateAutoRefreshMinutes 给出明确报错；
+   * 这里只做收敛，非法值按默认处理，避免写坏配置后服务起不来。
+   */
+  setAutoRefreshMinutes(minutes) {
+    const n = normalizeAutoRefreshMinutes(minutes);
+    this.data.autoRefreshMinutes = n;
+    this.save();
+    return n;
   }
 
   /** 设置/修改管理口令（先过强度校验），明文落盘 */
