@@ -20,6 +20,7 @@ test-data/
 
 # Agent 工作区
 .workbuddy/
+.codegraph/
 
 # 系统
 .DS_Store

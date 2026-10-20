@@ -140,6 +140,7 @@ async function discoverAccountLocked(account) {
   const out = [];
   for (const p of products) {
     let subs = [];
+    let subsComplete = false;
     try {
       // 先打开订阅开关（V2raySocks 模块：不激活时上游 osubscribe.php 返回 404，
       // 转换站则报「doesn't contain any valid node info」）。重复激活是幂等的。
@@ -150,11 +151,17 @@ async function discoverAccountLocked(account) {
 
       const page = await fsp.get(productDetailsUrl(account.baseUrl, p.id));
       subs = parseSubscriptions(page.html);
+      // 0 条也可能是模板临时变化/页面异常，不能据此清空已有本地订阅。
+      // 只有确实解析到至少一条，才把本轮视为完整快照。
+      subsComplete = subs.length > 0;
+      if (!subsComplete) {
+        log(`[discover]   ${p.name}(${p.id}) 未解析到订阅，保留已有本地地址`);
+      }
     } catch (e) {
       log(`[discover]   ${p.name}(${p.id}) 详情页抓取失败：${describeError(e)}`);
     }
     log(`[discover]   ${p.name} → ${subs.length} 条订阅`);
-    out.push({ serviceId: p.id, name: p.name, expire: p.expire, subs });
+    out.push({ serviceId: p.id, name: p.name, expire: p.expire, subs, subsComplete });
     await sleep(400); // 少量间隔，别把机场打疼
   }
   return out;

@@ -95,9 +95,13 @@ store.saveAccounts([
 store.saveDiscovered(accA.id, PRODUCTS.map((p) => ({ ...p, subs: p.subs.map((s) => ({ ...s })) })));
 const sub = store.listSubs()[0];
 const oldToken = sub.sub.token;
+sub.product.retiredSubs = [{
+  id: 'oldhis', name: sub.sub.name, url: sub.sub.url, token: oldToken,
+}];
 const newToken = store.regenerateSubToken(sub.key);
 check('token 轮换成功且变化', !!newToken && newToken !== oldToken);
 check('轮换后旧 token 不再存在', !store.listSubs().some((e) => e.sub.token === oldToken));
+check('轮换清理同订阅的历史旧 token', !sub.product.retiredSubs.some((s) => s.token === oldToken));
 
 /* ---- 同一登录不允许提交两次（两条全新条目，服务端兜底） ---- */
 let dupMsg = '';
@@ -142,6 +146,27 @@ try { healed = normalize(withDup); } catch (e) { healed = null; dupError = e.mes
 check('含重复套餐的配置能正常 normalize', !!healed, dupError || '');
 check('重复套餐被去重（保留第一条）', healed && healed.products.length === 1, healed ? String(healed.products.length) : '');
 check('去重后 products 是数组且字段完整', healed && Array.isArray(healed.products) && healed.products[0].subs.length === 1);
+
+/* ---- 历史订阅的坏数据自愈：重复 id/token 跳过，不阻断启动 ---- */
+const withRetiredDup = {
+  version: 1,
+  accounts: [{ name: '花云', baseUrl: 'https://api-flowercloud.com', email: 'retired@x.com', password: 'pw' }],
+  products: [{
+    id: 'p-retired', accountId: '', serviceId: '409900', name: 'Retired',
+    subs: [{ id: 'active', name: 'Clash', url: 'https://u/active', token: 'aaaaaaaaaaaaaaaa' }],
+    retiredSubs: [
+      { id: 'active', name: '重复 id', url: 'https://u/dup-id', token: 'bbbbbbbbbbbbbbbb' },
+      { id: 'dup-token', name: '重复 token', url: 'https://u/dup-token', token: 'aaaaaaaaaaaaaaaa' },
+      { id: 'history', name: '可恢复历史', url: 'https://u/history', token: 'cccccccccccccccc' },
+    ],
+  }],
+};
+let retiredHealed;
+let retiredError = '';
+try { retiredHealed = normalize(withRetiredDup); } catch (e) { retiredHealed = null; retiredError = e.message; }
+check('历史订阅含重复 id/token 时仍能 normalize', !!retiredHealed, retiredError);
+check('坏历史项被跳过、合法历史保留',
+  retiredHealed?.products[0]?.retiredSubs.length === 1 && retiredHealed.products[0].retiredSubs[0].id === 'history');
 
 /* ---- 密码可逆加密存储（密钥按邮箱派生，导出文件跨设备可解） ---- */
 store.saveAccounts([

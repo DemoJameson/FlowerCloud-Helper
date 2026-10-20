@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 process.env.CONFIG_FILE = mkdtempSync(path.join(tmpdir(), 'fch-ident-')) + '/config.json';
-const { store } = await import('../src/store.js');
+const { store, normalize } = await import('../src/store.js');
 
 let pass = 0;
 let fail = 0;
@@ -39,6 +39,11 @@ function seed(token = 'orig') {
 
 const snap = () =>
   store.listSubs().map((e) => ({ key: e.key, name: e.sub.name, token: e.sub.token, url: e.sub.url }));
+
+const subsOf = (accountId, serviceId = '1001') => {
+  const p = store.data.products.find((x) => x.accountId === accountId && x.serviceId === serviceId);
+  return (p?.subs || []).map((s) => ({ key: `${p.id}-${s.id}`, name: s.name, token: s.token, url: s.url }));
+};
 
 /* ---------------- 1. url 完全不变 ---------------- */
 
@@ -134,7 +139,7 @@ const snap = () =>
     ] },
   ]);
   const after = snap();
-  check('同名多条 + 全换 url → 位置兜底不错位', after.every((s, i) => s.token === before[i].token),
+  check('同名多条 + 全换 url → 名称匹配不错位', after.every((s, i) => s.token === before[i].token),
     after.map((s, i) => `${s.url.match(/target=(\w+)/)?.[1]}:${s.token === before[i].token ? 'OK' : '错位'}`).join(' '));
 }
 
@@ -175,8 +180,8 @@ const snap = () =>
   check('顺序变化 + 删一条 → Clash token 保住',
     tok(after, 'Clash') === tok(before, 'Clash'),
     `${String(tok(before, 'Clash')).slice(0, 6)} → ${String(tok(after, 'Clash')).slice(0, 6)}`);
-  check('新订阅 Loon 拿新 token，不抢 Clash 的',
-    tok(after, 'Loon') !== tok(before, 'Clash'),
+  check('新订阅 Loon 不抢任何现有活动订阅的 token',
+    !before.some((s) => s.token === tok(after, 'Loon')),
     `Loon=${String(tok(after, 'Loon')).slice(0, 6)}`);
   check('被删的 Surge 不再出现', !after.some((s) => s.name === 'Surge'));
 }
@@ -220,6 +225,108 @@ const snap = () =>
   check('serviceId 变化 → 老套餐仍保留', !!old);
   check('serviceId 变化 → 老 token 未被改写', old && old.sub.url.includes('t9'));
   check('serviceId 变化 → 新套餐用新 token', neu && neu.sub.token !== old?.sub.token);
+}
+
+/* ---------------- 11. 详情页临时失败：不得清空旧订阅 ---------------- */
+
+{
+  const accId = seed('failure');
+  const before = subsOf(accId);
+  store.saveDiscovered(accId, [
+    { serviceId: '1001', name: 'Lite', subs: [], subsComplete: false },
+  ]);
+  const after = subsOf(accId);
+  check('详情页失败 → 旧订阅不被清空', after.length === before.length, `${before.length} → ${after.length}`);
+  check('详情页失败 → 所有 token 保持不变', after.every((s, i) => s.token === before[i].token));
+}
+
+/* ---------------- 12. 单条订阅短暂消失：恢复后沿用原 token ---------------- */
+
+{
+  const accId = seed('missing');
+  const before = subsOf(accId);
+  const oldSurge = before.find((s) => s.name === 'Surge');
+  // 模拟本轮只解析到 Clash，Surge 被页面临时漏掉。
+  store.saveDiscovered(accId, [
+    { serviceId: '1001', name: 'Lite', subs: [
+      { name: 'Clash', url: withParam('clash', 'missing-next') },
+    ] },
+  ]);
+  const partial = subsOf(accId);
+  check('单条暂时消失 → 活动列表只保留本轮订阅', partial.length === 1, String(partial.length));
+  check('单条暂时消失 → 未消失的 token 保持', partial[0]?.token === before[0]?.token);
+  const persisted = normalize(JSON.parse(JSON.stringify(store.data)));
+  const persistedProduct = persisted.products.find(
+    (p) => p.accountId === accId && p.serviceId === '1001'
+  );
+  const retiredSurge = (persistedProduct?.retiredSubs || []).find((s) => s.name === 'Surge');
+  check('单条暂时消失 → 历史 token 可落盘并重新载入', retiredSurge?.token === oldSurge?.token);
+
+  // Surge 下一轮回来，且上游地址也换了；历史记录仍应把原 token 还给它。
+  store.saveDiscovered(accId, [
+    { serviceId: '1001', name: 'Lite', subs: [
+      { name: 'Clash', url: withParam('clash', 'missing-next') },
+      { name: 'Surge', url: withParam('surge', 'missing-returned') },
+    ] },
+  ]);
+  const restored = subsOf(accId);
+  const newSurge = restored.find((s) => s.name === 'Surge');
+  check('单条订阅恢复 → 原 token 恢复', !!newSurge && newSurge.token === oldSurge?.token);
+}
+
+/* ---------------- 13. 名称和 url 都认不出：不得按位置猜身份 ---------------- */
+
+{
+  const accId = seed('position');
+  const before = subsOf(accId);
+  store.saveDiscovered(accId, [
+    { serviceId: '1001', name: 'Lite', subs: [
+      { name: '客户端 A', url: withParam('a', 'position-next') },
+      { name: '客户端 B', url: withParam('b', 'position-next') },
+    ] },
+  ]);
+  const after = subsOf(accId);
+  check('身份完全无法识别 → 不复用旧 token', after.every((s) => !before.some((b) => b.token === s.token)));
+}
+
+/* ---------------- 14. 新增订阅 + 另一条地址轮换：新增项不能抢旧 token ---------------- */
+
+{
+  const accId = seed('mixed-add');
+  const before = subsOf(accId);
+  store.saveDiscovered(accId, [
+    { serviceId: '1001', name: 'Lite', subs: [
+      { name: 'Loon 专属新增', url: withParam('loon-new', 'mixed-add') },
+      { name: 'Surge', url: withParam('surge', 'mixed-add-rotated') },
+    ] },
+  ]);
+  const after = subsOf(accId);
+  const newLoon = after.find((s) => s.name === 'Loon 专属新增');
+  const oldSurge = before.find((s) => s.name === 'Surge');
+  const newSurge = after.find((s) => s.name === 'Surge');
+  check('新增项不抢现有活动 token', !!newLoon && !before.some((s) => s.token === newLoon.token));
+  check('另一条地址轮换 → 原 token 保持', newSurge?.token === oldSurge?.token);
+}
+
+/* ---------------- 15. 改名 + 上游轮换：target 签名仍能认回原订阅 ---------------- */
+
+{
+  const accId = seed('signature');
+  const before = subsOf(accId);
+  store.saveDiscovered(accId, [
+    { serviceId: '1001', name: 'Lite', subs: [
+      { name: '客户端 B', url: withParam('surge', 'signature-next') },
+      { name: '客户端 A', url: withParam('clash', 'signature-next') },
+    ] },
+  ]);
+  const after = subsOf(accId);
+  const targetOf = (s) => new URL(s.url).searchParams.get('target');
+  const oldClash = before.find((s) => targetOf(s) === 'clash');
+  const oldSurge = before.find((s) => targetOf(s) === 'surge');
+  const newClash = after.find((s) => targetOf(s) === 'clash');
+  const newSurge = after.find((s) => targetOf(s) === 'surge');
+  check('改名+轮换 → Clash 签名匹配原 token', newClash?.token === oldClash?.token);
+  check('改名+轮换 → Surge 签名匹配原 token', newSurge?.token === oldSurge?.token);
 }
 
 rmSync(process.env.CONFIG_FILE, { force: true });

@@ -5,6 +5,8 @@
  *   accounts[]   机场账号：机场名 + 地址 + 邮箱 + 密码（可配多个，同机场不同账号）
  *   products[]   抓取到的套餐，归属某个账号；流量/到期是套餐级信息，
  *                刷新时每个套餐只拉一条订阅即可拿到（各订阅共用同一个上游 token）
+ *                subs[] 是当前活动订阅；retiredSubs[] 保存短暂消失过的
+ *                id/token，只用于恢复旧地址，不对外展示
  *   autoRefreshMinutes  自动「刷新全部」的间隔（分钟），0 = 关闭，默认 20
  *
  * 用户只需要填账号，套餐与订阅链接全部由程序登录后自动获取。
@@ -58,28 +60,54 @@ function genToken() {
  *
  * 匹配分层，先精确后模糊，且每条旧记录只用一次（避免两条新订阅抢同一条旧记录）：
  *   1. url 完全相同
- *   2. name 相同（订阅名由机场页面给出，如「Clash」「Trojan Surge」，语义稳定）
- *   3. 同一位置（前面都没配上时的兜底）
+ *   2. 订阅类型签名相同（target + filename，上游 token 轮换时通常保持不变）
+ *   3. name 相同（订阅名由机场页面给出，如「Clash」「Trojan Surge」，语义稳定）
  *
- * **必须分层整轮跑，不能一条一条顺着降级**。曾经写成「每条新订阅依次尝试
- * url → name → 位置」，于是机场删掉 Surge、新增 Loon 且 Loon 排在最前时：
- * Loon 的 url 配不上就落到位置层，抢走了 Clash 的旧记录；而轮到 Clash 时
- * url 层、name 层已无旧记录可配，Clash 反而丢了 token —— 恰好是本函数
- * 要消灭的现象。整轮跑完 url 再整轮跑 name，Clash 会在第一轮就被认领走。
+ * 不按位置猜身份：机场删掉一条、新增另一条时，按位置复用 token 会让
+ * 旧地址开始返回另一条订阅。认不出来就生成新 token，正确性优先。
+ *
+ * **必须分层整轮跑，不能一条一条顺着降级**：先让所有新订阅完成精确 url
+ * 匹配，再做签名/名称匹配。否则一条新增订阅可能先抢走后面某条旧记录的
+ * token，等真正的旧订阅轮到匹配时已经无记录可用。
  */
-function matchSubs(oldSubs, newSubs) {
+function matchSubs(oldSubs, newSubs, retiredSubs = []) {
   const valid = newSubs.filter((s) => HTTP_RE.test(String(s?.url || '')));
 
   // name 归一化：机场页面上的空白/大小写差异不该让匹配落空
   const key = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
-  const oldPool = oldSubs.map((s) => ({ sub: s, used: false }));
+  // 转换站链接的 target/filename 是订阅类型，不随上游 token 变化；
+  // 两者都没有的直连地址返回空串，不参与这一层匹配。
+  const signatureOf = (s) => {
+    try {
+      const u = new URL(String(s?.url || ''));
+      const target = String(u.searchParams.get('target') || '').trim().toLowerCase();
+      const filename = String(u.searchParams.get('filename') || '').trim().toLowerCase();
+      return target || filename ? `${target}|${filename}` : '';
+    } catch {
+      return '';
+    }
+  };
+
+  // 当前订阅排在前面，历史订阅排在后面。这样同一个 id/token 同时出现在
+  // 两处时（旧版本配置或异常写入）永远优先使用当前记录。
+  const oldPool = [];
+  const seen = new Set();
+  for (const sub of [...oldSubs, ...retiredSubs]) {
+    if (!HTTP_RE.test(String(sub?.url || ''))) continue;
+    const id = String(sub?.id || '').trim();
+    const token = String(sub?.token || '').trim();
+    if ((id && seen.has(`id:${id}`)) || (token && seen.has(`token:${token}`))) continue;
+    if (id) seen.add(`id:${id}`);
+    if (token) seen.add(`token:${token}`);
+    oldPool.push({ sub, used: false });
+  }
   const claimed = new Array(valid.length).fill(null);
 
   /** 把本轮仍未认领、且满足 pred 的第一条旧记录认领给第 i 条新订阅 */
   const claim = (i, pred) => {
     if (claimed[i]) return;
-    const hit = oldPool.find((o) => !o.used && pred(o.sub, i));
+    const hit = oldPool.find((o) => !o.used && pred(o.sub, i, o));
     if (!hit) return;
     hit.used = true;
     claimed[i] = hit.sub;
@@ -90,22 +118,43 @@ function matchSubs(oldSubs, newSubs) {
 
   // 每层跑完整一轮：先精确后模糊，且不会互相抢占
   for (let i = 0; i < valid.length; i++) claim(i, (o) => o.url === urlOf(valid[i]));
+
+  // 签名必须在新旧两边都唯一才采用，避免多条 Clash 类订阅互相抢 token。
+  const oldSigCount = new Map();
+  const newSigCount = new Map();
+  for (const o of oldPool) {
+    const sig = signatureOf(o.sub);
+    if (sig) oldSigCount.set(sig, (oldSigCount.get(sig) || 0) + 1);
+  }
+  for (const s of valid) {
+    const sig = signatureOf(s);
+    if (sig) newSigCount.set(sig, (newSigCount.get(sig) || 0) + 1);
+  }
+  for (let i = 0; i < valid.length; i++) {
+    const sig = signatureOf(valid[i]);
+    if (!sig || oldSigCount.get(sig) !== 1 || newSigCount.get(sig) !== 1) continue;
+    claim(i, (o) => signatureOf(o) === sig);
+  }
+
   for (let i = 0; i < valid.length; i++) {
     const name = key(nameOf(valid[i], i));
     if (name) claim(i, (o) => key(o.name) === name);
   }
-  for (let i = 0; i < valid.length; i++) claim(i, (_o, j) => j === i);
-  for (let i = 0; i < valid.length; i++) claim(i, () => true);
 
-  return valid.map((s, i) => {
-    const kept = claimed[i];
-    return {
-      id: kept?.id || genId(),
-      name: nameOf(s, i),
-      url: urlOf(s),
-      token: kept?.token || genToken(),
-    };
-  });
+  return {
+    subs: valid.map((s, i) => {
+      const kept = claimed[i];
+      return {
+        id: kept?.id || genId(),
+        name: nameOf(s, i),
+        url: urlOf(s),
+        token: kept?.token || genToken(),
+      };
+    }),
+    // 本轮没出现的旧订阅不直接丢掉：只从活动列表隐藏，但保留 id/token。
+    // 机场页面偶尔会漏掉某一条，等它下次出现时仍能恢复原来的本地地址。
+    retiredSubs: oldPool.filter((o) => !o.used).map((o) => o.sub),
+  };
 }
 
 /** 6 位十六进制 id（URL 安全） */
@@ -220,6 +269,25 @@ function normAccount(raw, where, seen) {
   };
 }
 
+/** 校验一条订阅；活动列表与历史列表共用，保证恢复时 id/token 仍合法 */
+function normSub(raw, where, seen, usedTokens, fallbackName = '订阅') {
+  const url = String(raw?.url ?? '').trim();
+  if (!url) fail(`${where} 缺少 url`);
+  if (!HTTP_RE.test(url)) fail(`${where} 的 url 必须以 http(s):// 开头`);
+
+  const token = String(raw?.token ?? '').trim() || genToken();
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(token)) fail(`${where} 的 token 格式不合法`);
+  if (usedTokens.has(token)) fail(`${where} 的 token 与其它订阅重复`);
+  usedTokens.add(token);
+
+  return {
+    id: pickId(raw?.id, where, seen),
+    name: String(raw?.name ?? '').trim() || fallbackName,
+    url,
+    token,
+  };
+}
+
 /** 校验管理页提交的自动刷新间隔；通过返回 ''，否则返回给用户看的错误信息 */
 export function validateAutoRefreshMinutes(raw) {
   const n = Number(raw);
@@ -265,6 +333,29 @@ function normProducts(raw, where, seen, accounts, usedTokens) {
     // 流量是套餐级信息：来自 subscription-userinfo 响应头
     const traffic = p?.traffic && Number.isFinite(Number(p.traffic.total)) ? p.traffic : null;
 
+    const subs = (Array.isArray(p?.subs) ? p.subs : []).map((s, j) =>
+      normSub(s, `${at}.subs[${j}]`, seen, usedTokens, `订阅 ${j + 1}`)
+    );
+
+    // 历史订阅只用于复用旧 id/token，不参与 /status、列表展示或订阅输出。
+    // 配置升级时缺失该字段等价于空历史；重复项直接跳过，避免旧数据阻断启动。
+    const retiredIds = new Set(subs.map((s) => s.id));
+    const retiredTokens = new Set(subs.map((s) => s.token));
+    const retiredSubs = [];
+    for (const [j, s] of (Array.isArray(p?.retiredSubs) ? p.retiredSubs : []).entries()) {
+      const rawId = String(s?.id ?? '').trim();
+      const rawToken = String(s?.token ?? '').trim();
+      const url = String(s?.url ?? '').trim();
+      if (!HTTP_RE.test(url) || !/^[A-Za-z0-9_-]{16,64}$/.test(rawToken)) continue;
+      if ((rawId && (retiredIds.has(rawId) || seen.has(rawId))) || usedTokens.has(rawToken)) {
+        continue;
+      }
+      const sub = normSub(s, `${at}.retiredSubs[${j}]`, seen, usedTokens);
+      retiredIds.add(sub.id);
+      retiredTokens.add(sub.token);
+      retiredSubs.push(sub);
+    }
+
     out.push({
       id: pickId(p?.id, at, seen),
       accountId,
@@ -277,24 +368,8 @@ function normProducts(raw, where, seen, accounts, usedTokens) {
       lastError: String(p?.lastError ?? ''),
       lastErrorAt: Number(p?.lastErrorAt) || 0,
 
-      subs: (Array.isArray(p?.subs) ? p.subs : []).map((s, j) => {
-        const sat = `${at}.subs[${j}]`;
-        const url = String(s?.url ?? '').trim();
-        if (!url) fail(`${sat} 缺少 url`);
-        if (!HTTP_RE.test(url)) fail(`${sat} 的 url 必须以 http(s):// 开头`);
-
-        const token = String(s?.token ?? '').trim() || genToken();
-        if (!/^[A-Za-z0-9_-]{16,64}$/.test(token)) fail(`${sat} 的 token 格式不合法`);
-        if (usedTokens.has(token)) fail(`${sat} 的 token 与其它订阅重复`);
-        usedTokens.add(token);
-
-        return {
-          id: pickId(s?.id, sat, seen),
-          name: String(s?.name ?? '').trim() || `订阅 ${j + 1}`,
-          url,
-          token,
-        };
-      }),
+      subs,
+      retiredSubs,
     });
   }
   return out;
@@ -453,6 +528,18 @@ class Store {
     const merged = discovered.map((p) => {
       const serviceId = String(p.serviceId || '').trim();
       const prev = oldById.get(serviceId);
+      const oldSubs = Array.isArray(prev?.subs) ? prev.subs : [];
+      const retiredSubs = Array.isArray(prev?.retiredSubs) ? prev.retiredSubs : [];
+      const incomingSubs = (Array.isArray(p.subs) ? p.subs : []).filter((s) =>
+        HTTP_RE.test(String(s?.url || ''))
+      );
+      // 详情页抓取失败时 state 会传 subsComplete=false。此时绝不能把
+      // 现有订阅覆盖成空数组，否则下一次成功刷新会为同一订阅重新发 token。
+      const hasSnapshot =
+        p.subsComplete === true || (p.subsComplete !== false && incomingSubs.length > 0);
+      const matched = hasSnapshot
+        ? matchSubs(oldSubs, incomingSubs, retiredSubs)
+        : { subs: oldSubs, retiredSubs };
       return {
         id: prev?.id || genId(),
         accountId,
@@ -463,7 +550,8 @@ class Store {
         trafficUpdatedAt: prev?.trafficUpdatedAt ?? 0,
         lastError: prev?.lastError ?? '',
         lastErrorAt: prev?.lastErrorAt ?? 0,
-        subs: matchSubs(prev?.subs || [], p.subs || []),
+        subs: matched.subs,
+        retiredSubs: matched.retiredSubs,
       };
     });
 
@@ -511,10 +599,18 @@ class Store {
   regenerateSubToken(key) {
     const entry = this.findSub(key);
     if (!entry) return null;
-    const used = new Set(this.listSubs().map((e) => e.sub.token));
+    const oldToken = entry.sub.token;
+    const used = new Set([
+      ...this.listSubs().map((e) => e.sub.token),
+      ...this.data.products.flatMap((p) => (p.retiredSubs || []).map((s) => s.token)),
+    ]);
     let token = genToken();
     while (used.has(token)) token = genToken();
     entry.sub.token = token;
+    // 手动轮换意味着旧 token 必须永久作废，历史记录也不能把它复活。
+    entry.product.retiredSubs = (entry.product.retiredSubs || []).filter(
+      (s) => s.id !== entry.sub.id && s.url !== entry.sub.url && s.token !== oldToken
+    );
     this.save();
     return token;
   }
