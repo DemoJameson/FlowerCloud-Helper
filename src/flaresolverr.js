@@ -18,17 +18,29 @@ import { log } from './logtime.js';
 
 const API = () => (config.flareSolverrUrl || 'http://flaresolverr:8191').replace(/\/+$/, '');
 
-/** Cloudflare 人机验证的页面特征 */
-const CF_RE = /just a moment|checking your browser|请稍候|验证|cf-chl|challenge-platform|turnstile/i;
+/**
+ * Cloudflare 人机验证页面的特征。
+ *
+ * ⚠️ 只认「挑战页独有」的标记：正常页面里也会出现 `challenge-platform`
+ * （CF 注入的 jsd 脚本，花云登录页末尾就有一处）和普通的中文「验证」字样，
+ * 拿它们做判断会把放行成功的页面又当成拦截，白白重建会话。
+ */
+const CF_RE = /<title>\s*(just a moment|checking your browser)|window\._cf_chl_opt|cf-chl-|id=["']challenge-form/i;
 
 /* ------------------------------------------------------------------ */
 /* 与 FlareSolverr 的 HTTP 交互                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 本端比 FlareSolverr 多等的余量：让对面先把「为什么失败」说出来，
+ * 而不是被我们抢先 abort 成一句没有信息量的超时。
+ */
+const CLIENT_GRACE_MS = 5000;
+
 async function call(payload, timeoutMs = config.cfTimeoutMs) {
   const url = `${API()}/v1`;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs + CLIENT_GRACE_MS);
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -36,14 +48,31 @@ async function call(payload, timeoutMs = config.cfTimeoutMs) {
       body: JSON.stringify(payload),
       signal: ctrl.signal,
     });
-    if (!res.ok) throw new Error(`FlareSolverr HTTP ${res.status}`);
-    const json = await res.json();
+    // FlareSolverr 失败时同样是 JSON —— HTTP 500 + {status:'error', message:'...'}。
+    // 只按 !res.ok 抛状态码，就会把「Timeout after 60s」这类真原因丢掉，
+    // 日志里只剩一句 FlareSolverr HTTP 500，等于什么都没说。
+    const text = await res.text();
+    let json = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    if (!json || typeof json !== 'object') {
+      const detail = String(text || '').trim().slice(0, 200);
+      throw new Error(`FlareSolverr HTTP ${res.status}${detail ? `：${detail}` : '（空响应）'}`);
+    }
     // status: ok | error
     if (json.status !== 'ok') {
-      const msg = json.message || json.error || '未知错误';
+      const msg = json.message || json.error || `HTTP ${res.status}`;
       throw new Error(`FlareSolverr: ${msg}`);
     }
     return json.solution || {};
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      throw new Error(`FlareSolverr 请求超时（本端等了 ${Math.round(timeoutMs / 1000)}s）`, { cause: e });
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
   }
@@ -109,7 +138,12 @@ function blocked(solution) {
  * 首次若被验证拦住，会话重建后再试一次。
  */
 export async function get(url, { session = true, timeoutMs } = {}) {
-  const opts = timeoutMs ? { maxTimeout: Math.ceil(timeoutMs / 1000) } : {};
+  // ⚠️ maxTimeout 的单位是**毫秒**（FlareSolverr 直接拿它当内部 deadline）。
+  // 两处历史坑：① 曾写成 Math.ceil(ms/1000)，120000 变成 120，对面立刻回
+  // 「Timeout after 0.12 seconds」；② 曾只在显式传 timeoutMs 时才填，于是所有
+  // 调用都落回 FlareSolverr 自己的 60s 默认值 —— FLARESOLVERR_TIMEOUT_MS=120000
+  // 只作用在本端 fetch 的 abort 上，从来没告诉过对面。现在一律按配置发过去。
+  const opts = { maxTimeout: timeoutMs || config.cfTimeoutMs };
   let solution = await call({ cmd: 'request.get', url, ...opts, session: session ? await ensureSession() : undefined });
 
   if (blocked(solution)) {
@@ -143,7 +177,7 @@ export async function get(url, { session = true, timeoutMs } = {}) {
  * 先 GET 一次登录页拿到 token 和 cookie，再带着它们 POST。
  */
 export async function post(url, fields, { timeoutMs } = {}) {
-  const opts = timeoutMs ? { maxTimeout: Math.ceil(timeoutMs / 1000) } : {};
+  const opts = { maxTimeout: timeoutMs || config.cfTimeoutMs };
   let solution = await call({
     cmd: 'request.post',
     url,

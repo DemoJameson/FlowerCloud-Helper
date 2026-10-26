@@ -34,7 +34,16 @@ export function describeError(e) {
       '或检查 FLARESOLVERR_URL 配置。'
     );
   }
-  if (/FlareSolverr:/i.test(msg)) return msg;
+  if (/FlareSolverr:/i.test(msg)) {
+    // squatter / 机房 IP 被 CF 判死的典型回显：告诉用户该换什么，而不是照抄英文
+    if (/datacenter-ip-blocked|needs residential proxy/i.test(msg)) {
+      return (
+        `${msg} —— 出口 IP 被花云的 Cloudflare 判定为机房段（拿到 cf_clearance 也放不过）。` +
+        '换一个能正常打开花云面板的出口（住宅/家宽代理）再试，或改用标准 FlareSolverr。'
+      );
+    }
+    return msg;
+  }
   if (/人机验证|Cloudflare/i.test(msg)) return `${msg}（FlareSolverr 已尝试放行仍未通过）`;
   return msg;
 }
