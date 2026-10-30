@@ -12,7 +12,7 @@
 #    不含任何架构相关内容，两个架构完全一致，可直接复用
 #  ·  npm ci：依赖只有 express 与 dotenv，全是纯 JS、无原生二进制，
 #    装出来的 node_modules 逐字节相同
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS prep
+FROM --platform=$BUILDPLATFORM node:25-bookworm-slim AS prep
 
 # 订阅回源是 Node fetch 发起的 HTTPS 请求，需要系统 CA 根证书。
 # node:22-bookworm-slim 本身不带（实测 /etc/ssl 目录都不存在），必须装。
@@ -28,7 +28,7 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci --omit=dev --no-audit --no-fund
 
 # ---- 运行时镜像：只有基础镜像 + 上面准备好的产物 + 业务代码 ----
-FROM node:22-bookworm-slim
+FROM node:25-bookworm-slim
 
 WORKDIR /app
 
